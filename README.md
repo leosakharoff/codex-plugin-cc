@@ -12,6 +12,9 @@ they already have.
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
 - `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+- `/codex:session` to see or reset the Codex thread that belongs to the current Claude Code session
+
+This fork (leosakharoff/codex-plugin-cc, branch `ws-session-thread`) adds one Codex thread per Claude Code session. See [Session thread](#session-thread).
 
 ## Requirements
 
@@ -263,6 +266,19 @@ Then check in with:
 /codex:status
 /codex:result
 ```
+
+## Session thread
+
+Upstream starts a new Codex thread for every review and, unless you say `--resume`, for every rescue. This fork keeps one persistent Codex thread per Claude Code session instead.
+
+- The first `/codex:rescue`, `/codex:review`, or `/codex:adversarial-review` in a session creates the thread. It gets a name like `Codex Companion Session <repo> <time> (<session>)` so you can find it in the Codex app or with `codex resume`.
+- Every later rescue or review in the same Claude session runs as a new turn in that thread. Codex remembers what it flagged, what you fixed, and what you rejected.
+- The first prompt-based turn carries a short primer that tells Codex it is one half of a two-agent loop and should keep the thread's memory. Native `/codex:review` turns cannot carry a prompt, so the primer waits for the first rescue or adversarial review.
+- `/codex:session` shows the thread id, turn count, and the `codex resume` command. `/codex:session --reset` forgets the mapping so the next run starts a new thread.
+- `--fresh` on rescue or review starts a new session thread. `--ephemeral` runs that one call in a throwaway thread and leaves the session thread alone.
+- Only one turn can run on the thread at a time. A background rescue on the session thread blocks a second session-thread run until it finishes; use `--ephemeral` to run something beside it.
+- Outside Claude Code (no `CODEX_COMPANION_SESSION_ID`), the companion behaves as upstream does.
+- The mapping is cleared on `SessionEnd`. The Codex thread itself stays in Codex's own history.
 
 ## Codex Integration
 

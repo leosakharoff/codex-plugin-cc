@@ -29,9 +29,10 @@ Command selection:
 - If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
 - If the forwarded request includes `--effort`, pass it through to `task`.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
-- If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
+- If the forwarded request includes `--fresh`, strip that token from the task text and add `--fresh` to the command. It starts a new session thread.
+- If the forwarded request includes `--ephemeral`, strip that token from the task text and add `--ephemeral` to the command. It runs in a throwaway thread.
+- With none of those flags, `task` runs as the next turn in the current Claude session's Codex thread. That is the default and needs no flag.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.
-- `--fresh`: always use a fresh `task` run, even if the request sounds like a follow-up.
 - `--effort`: accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`.
 - `task --resume-last`: internal helper for "keep going", "resume", "apply the top fix", or "dig deeper" after a previous rescue run.
 

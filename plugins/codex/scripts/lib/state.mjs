@@ -22,8 +22,16 @@ function defaultState() {
     config: {
       stopReviewGate: false
     },
-    jobs: []
+    jobs: [],
+    sessionThreads: {}
   };
+}
+
+function normalizeSessionThreads(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return { ...value };
 }
 
 export function resolveStateDir(cwd) {
@@ -70,7 +78,8 @@ export function loadState(cwd) {
         ...defaultState().config,
         ...(parsed.config ?? {})
       },
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
+      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
+      sessionThreads: normalizeSessionThreads(parsed.sessionThreads)
     };
   } catch {
     return defaultState();
@@ -99,7 +108,8 @@ export function saveState(cwd, state) {
       ...defaultState().config,
       ...(state.config ?? {})
     },
-    jobs: nextJobs
+    jobs: nextJobs,
+    sessionThreads: normalizeSessionThreads(state.sessionThreads)
   };
 
   const retainedIds = new Set(nextJobs.map((job) => job.id));
@@ -161,6 +171,37 @@ export function setConfig(cwd, key, value) {
 
 export function getConfig(cwd) {
   return loadState(cwd).config;
+}
+
+export function getSessionThread(cwd, sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  return loadState(cwd).sessionThreads[sessionId] ?? null;
+}
+
+export function setSessionThread(cwd, sessionId, record) {
+  if (!sessionId) {
+    return null;
+  }
+  updateState(cwd, (state) => {
+    const existing = state.sessionThreads[sessionId] ?? {};
+    state.sessionThreads[sessionId] = {
+      ...existing,
+      ...record,
+      updatedAt: nowIso()
+    };
+  });
+  return getSessionThread(cwd, sessionId);
+}
+
+export function clearSessionThread(cwd, sessionId) {
+  if (!sessionId) {
+    return;
+  }
+  updateState(cwd, (state) => {
+    delete state.sessionThreads[sessionId];
+  });
 }
 
 export function writeJobFile(cwd, jobId, payload) {

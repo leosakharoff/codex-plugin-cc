@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -27,10 +27,13 @@ import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
+  clearSessionThread,
   generateJobId,
   getConfig,
+  getSessionThread,
   listJobs,
   setConfig,
+  setSessionThread,
   upsertJob,
   writeJobFile
 } from "./lib/state.mjs";
@@ -71,15 +74,17 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const SESSION_THREAD_PREFIX = "Codex Companion Session";
 
 function printUsage() {
   console.log(
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--ephemeral|--fresh]",
+      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--ephemeral|--fresh] [focus text]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh|--ephemeral] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs session [--reset] [--json]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -355,6 +360,103 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   return findLatestTaskThread(workspaceRoot);
 }
 
+function detectGitBranch(cwd) {
+  try {
+    const result = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd,
+      encoding: "utf8",
+      windowsHide: true
+    });
+    const branch = String(result.stdout ?? "").trim();
+    return result.status === 0 && branch ? branch : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildSessionThreadName(workspaceRoot, sessionId) {
+  const repo = path.basename(workspaceRoot) || "workspace";
+  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  return `${SESSION_THREAD_PREFIX} ${repo} ${stamp} (${String(sessionId).slice(0, 8)})`;
+}
+
+function buildSessionPrimer(workspaceRoot) {
+  const repo = path.basename(workspaceRoot) || "this repository";
+  const branch = detectGitBranch(workspaceRoot);
+  return [
+    "<session_thread>",
+    `You are the Codex half of a two-agent loop with Claude Code. This thread lasts for one Claude Code session in ${repo}${branch ? ` on branch ${branch}` : ""}.`,
+    "Claude sends several turns here: implementation tasks, read-only reviews, adversarial reviews, and follow-ups.",
+    "Keep the thread's memory. Remember what you flagged, what Claude fixed or rejected and why, and do not re-raise a rejected finding without new evidence.",
+    "When a turn asks for a review, report findings with file and line. When a turn asks for a fix, make the smallest safe change and say what you verified.",
+    "End every turn with a compact final message that Claude can act on.",
+    "</session_thread>",
+    ""
+  ].join("\n");
+}
+
+function looksLikeMissingThreadError(error) {
+  const message = String(error?.message ?? error ?? "");
+  return /not found|no such|does not exist|unknown thread|missing thread/i.test(message);
+}
+
+function assertSessionThreadIdle(workspaceRoot, sessionId, threadId, excludeJobId) {
+  const active = listJobs(workspaceRoot).find(
+    (job) =>
+      job.id !== excludeJobId &&
+      job.sessionId === sessionId &&
+      isActiveJobStatus(job.status) &&
+      !job.ephemeral &&
+      (!threadId || !job.threadId || job.threadId === threadId)
+  );
+  if (active) {
+    throw new Error(
+      `The Codex session thread is busy with ${active.id} (${active.title ?? "job"}). Wait for /codex:status to show it finished, or pass --ephemeral for a one-off thread.`
+    );
+  }
+}
+
+function planSessionThreadTurn(workspaceRoot, { fresh = false, excludeJobId = null } = {}) {
+  const sessionId = getCurrentClaudeSessionId();
+  if (!sessionId) {
+    return null;
+  }
+
+  const record = fresh ? null : getSessionThread(workspaceRoot, sessionId);
+  if (record?.threadId) {
+    assertSessionThreadIdle(workspaceRoot, sessionId, record.threadId, excludeJobId);
+    return {
+      sessionId,
+      threadId: record.threadId,
+      needsPrimer: !record.primed,
+      threadName: null
+    };
+  }
+
+  assertSessionThreadIdle(workspaceRoot, sessionId, null, excludeJobId);
+  return {
+    sessionId,
+    threadId: null,
+    needsPrimer: true,
+    threadName: buildSessionThreadName(workspaceRoot, sessionId)
+  };
+}
+
+function recordSessionThreadTurn(workspaceRoot, plan, threadId, { kind, primed }) {
+  if (!plan || !threadId) {
+    return;
+  }
+  const existing = getSessionThread(workspaceRoot, plan.sessionId);
+  const sameThread = existing?.threadId === threadId;
+  setSessionThread(workspaceRoot, plan.sessionId, {
+    threadId,
+    createdAt: sameThread && existing?.createdAt ? existing.createdAt : nowIso(),
+    turns: (sameThread ? existing?.turns ?? 0 : 0) + 1,
+    lastKind: kind,
+    primed: Boolean((sameThread && existing?.primed) || primed)
+  });
+}
+
 async function executeReviewRun(request) {
   ensureCodexAvailable(request.cwd);
   ensureGitRepository(request.cwd);
@@ -365,13 +467,36 @@ async function executeReviewRun(request) {
   });
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
+  const workspaceRoot = resolveWorkspaceRoot(request.cwd);
+  const sessionPlan = request.ephemeral
+    ? null
+    : planSessionThreadTurn(workspaceRoot, { fresh: request.fresh, excludeJobId: request.jobId });
+
   if (reviewName === "Review") {
     const reviewTarget = validateNativeReviewRequest(target, focusText);
-    const result = await runAppServerReview(request.cwd, {
-      target: reviewTarget,
-      model: request.model,
-      onProgress: request.onProgress
-    });
+    const runNativeReview = (resumeThreadId) =>
+      runAppServerReview(request.cwd, {
+        target: reviewTarget,
+        model: request.model,
+        resumeThreadId,
+        persistThread: Boolean(sessionPlan),
+        threadName: sessionPlan?.threadName ?? null,
+        onProgress: request.onProgress
+      });
+    let result;
+    try {
+      result = await runNativeReview(sessionPlan?.threadId ?? null);
+    } catch (error) {
+      if (!sessionPlan?.threadId || !looksLikeMissingThreadError(error)) {
+        throw error;
+      }
+      clearSessionThread(workspaceRoot, sessionPlan.sessionId);
+      sessionPlan.threadId = null;
+      sessionPlan.needsPrimer = true;
+      sessionPlan.threadName = buildSessionThreadName(workspaceRoot, sessionPlan.sessionId);
+      result = await runNativeReview(null);
+    }
+    recordSessionThreadTurn(workspaceRoot, sessionPlan, result.sourceThreadId, { kind: "review", primed: false });
     const payload = {
       review: reviewName,
       target,
@@ -407,14 +532,32 @@ async function executeReviewRun(request) {
   }
 
   const context = collectReviewContext(request.cwd, target);
-  const prompt = buildAdversarialReviewPrompt(context, focusText);
-  const result = await runAppServerTurn(context.repoRoot, {
-    prompt,
-    model: request.model,
-    sandbox: "read-only",
-    outputSchema: readOutputSchema(REVIEW_SCHEMA),
-    onProgress: request.onProgress
-  });
+  const basePrompt = buildAdversarialReviewPrompt(context, focusText);
+  const runAdversarialTurn = (plan) =>
+    runAppServerTurn(context.repoRoot, {
+      resumeThreadId: plan?.threadId ?? null,
+      prompt: plan?.needsPrimer ? `${buildSessionPrimer(workspaceRoot)}${basePrompt}` : basePrompt,
+      model: request.model,
+      sandbox: "read-only",
+      outputSchema: readOutputSchema(REVIEW_SCHEMA),
+      persistThread: Boolean(plan),
+      threadName: plan?.threadName ?? null,
+      onProgress: request.onProgress
+    });
+  let result;
+  try {
+    result = await runAdversarialTurn(sessionPlan);
+  } catch (error) {
+    if (!sessionPlan?.threadId || !looksLikeMissingThreadError(error)) {
+      throw error;
+    }
+    clearSessionThread(workspaceRoot, sessionPlan.sessionId);
+    sessionPlan.threadId = null;
+    sessionPlan.needsPrimer = true;
+    sessionPlan.threadName = buildSessionThreadName(workspaceRoot, sessionPlan.sessionId);
+    result = await runAdversarialTurn(sessionPlan);
+  }
+  recordSessionThreadTurn(workspaceRoot, sessionPlan, result.threadId, { kind: "adversarial-review", primed: true });
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
@@ -468,6 +611,7 @@ async function executeTaskRun(request) {
   });
 
   let resumeThreadId = null;
+  let sessionPlan = null;
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId
@@ -476,23 +620,44 @@ async function executeTaskRun(request) {
       throw new Error("No previous Codex task thread was found for this repository.");
     }
     resumeThreadId = latestThread.id;
+  } else if (!request.ephemeral) {
+    sessionPlan = planSessionThreadTurn(workspaceRoot, { fresh: request.fresh, excludeJobId: request.jobId });
+    resumeThreadId = sessionPlan?.threadId ?? null;
   }
 
   if (!request.prompt && !resumeThreadId) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  const result = await runAppServerTurn(workspaceRoot, {
-    resumeThreadId,
-    prompt: request.prompt,
-    defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
-    model: request.model,
-    effort: request.effort,
-    sandbox: request.write ? "workspace-write" : "read-only",
-    onProgress: request.onProgress,
-    persistThread: true,
-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
-  });
+  const runTaskTurn = (threadId, plan) =>
+    runAppServerTurn(workspaceRoot, {
+      resumeThreadId: threadId,
+      prompt: plan?.needsPrimer ? `${buildSessionPrimer(workspaceRoot)}${request.prompt ?? ""}` : request.prompt,
+      defaultPrompt: threadId ? DEFAULT_CONTINUE_PROMPT : "",
+      model: request.model,
+      effort: request.effort,
+      sandbox: request.write ? "workspace-write" : "read-only",
+      onProgress: request.onProgress,
+      persistThread: true,
+      threadName: threadId
+        ? null
+        : plan?.threadName ?? buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
+    });
+
+  let result;
+  try {
+    result = await runTaskTurn(resumeThreadId, sessionPlan);
+  } catch (error) {
+    if (!sessionPlan?.threadId || !looksLikeMissingThreadError(error)) {
+      throw error;
+    }
+    clearSessionThread(workspaceRoot, sessionPlan.sessionId);
+    sessionPlan.threadId = null;
+    sessionPlan.needsPrimer = true;
+    sessionPlan.threadName = buildSessionThreadName(workspaceRoot, sessionPlan.sessionId);
+    result = await runTaskTurn(null, sessionPlan);
+  }
+  recordSessionThreadTurn(workspaceRoot, sessionPlan, result.threadId, { kind: "task", primed: true });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? result.stderr ?? "";
@@ -564,7 +729,7 @@ function getJobKindLabel(kind, jobClass) {
   return jobClass === "review" ? "review" : "rescue";
 }
 
-function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summary, write = false }) {
+function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summary, write = false, ephemeral = false }) {
   return createJobRecord({
     id: generateJobId(prefix),
     kind,
@@ -573,7 +738,8 @@ function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summ
     workspaceRoot,
     jobClass,
     summary,
-    write
+    write,
+    ...(ephemeral ? { ephemeral: true } : {})
   });
 }
 
@@ -589,7 +755,7 @@ function createTrackedProgress(job, options = {}) {
   };
 }
 
-function buildTaskJob(workspaceRoot, taskMetadata, write) {
+function buildTaskJob(workspaceRoot, taskMetadata, write, ephemeral = false) {
   return createCompanionJob({
     prefix: "task",
     kind: "task",
@@ -597,11 +763,12 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
     workspaceRoot,
     jobClass: "task",
     summary: taskMetadata.summary,
-    write
+    write,
+    ephemeral
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, fresh, ephemeral, jobId }) {
   return {
     cwd,
     model,
@@ -609,6 +776,8 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
     prompt,
     write,
     resumeLast,
+    fresh,
+    ephemeral,
     jobId
   };
 }
@@ -712,11 +881,15 @@ function enqueueBackgroundTask(cwd, job, request) {
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["base", "scope", "model", "cwd"],
-    booleanOptions: ["json", "background", "wait"],
+    booleanOptions: ["json", "background", "wait", "ephemeral", "fresh"],
     aliasMap: {
       m: "model"
     }
   });
+
+  if (options.ephemeral && options.fresh) {
+    throw new Error("Choose either --ephemeral or --fresh.");
+  }
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -734,7 +907,8 @@ async function handleReviewCommand(argv, config) {
     title: metadata.title,
     workspaceRoot,
     jobClass: "review",
-    summary: metadata.summary
+    summary: metadata.summary,
+    ephemeral: Boolean(options.ephemeral)
   });
   await runForegroundCommand(
     job,
@@ -746,6 +920,9 @@ async function handleReviewCommand(argv, config) {
         model: options.model,
         focusText,
         reviewName: config.reviewName,
+        fresh: Boolean(options.fresh),
+        ephemeral: Boolean(options.ephemeral),
+        jobId: job.id,
         onProgress: progress
       }),
     { json: options.json }
@@ -762,7 +939,7 @@ async function handleReview(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "ephemeral", "background"],
     aliasMap: {
       m: "model"
     }
@@ -776,8 +953,12 @@ async function handleTask(argv) {
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
   const fresh = Boolean(options.fresh);
+  const ephemeral = Boolean(options.ephemeral);
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
+  }
+  if (ephemeral && (fresh || resumeLast)) {
+    throw new Error("--ephemeral cannot be combined with --fresh or --resume-last.");
   }
   const write = Boolean(options.write);
   const taskMetadata = buildTaskRunMetadata({
@@ -789,7 +970,7 @@ async function handleTask(argv) {
     ensureCodexAvailable(cwd);
     requireTaskRequest(prompt, resumeLast);
 
-    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+    const job = buildTaskJob(workspaceRoot, taskMetadata, write, ephemeral);
     const request = buildTaskRequest({
       cwd,
       model,
@@ -797,6 +978,8 @@ async function handleTask(argv) {
       prompt,
       write,
       resumeLast,
+      fresh,
+      ephemeral,
       jobId: job.id
     });
     const { payload } = enqueueBackgroundTask(cwd, job, request);
@@ -804,7 +987,7 @@ async function handleTask(argv) {
     return;
   }
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+  const job = buildTaskJob(workspaceRoot, taskMetadata, write, ephemeral);
   await runForegroundCommand(
     job,
     (progress) =>
@@ -815,6 +998,8 @@ async function handleTask(argv) {
         prompt,
         write,
         resumeLast,
+        fresh,
+        ephemeral,
         jobId: job.id,
         onProgress: progress
       }),
@@ -960,6 +1145,51 @@ function handleTaskResumeCandidate(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
+function renderSessionReport(payload) {
+  if (!payload.sessionId) {
+    return "Not running inside a Claude Code session, so there is no session thread. Each Codex run uses its own thread.\n";
+  }
+  if (!payload.thread) {
+    return [
+      `Claude session: ${payload.sessionId}`,
+      "No Codex session thread yet. The next /codex:rescue, /codex:review, or /codex:adversarial-review creates it.",
+      ""
+    ].join("\n");
+  }
+  const lines = [
+    `Claude session: ${payload.sessionId}`,
+    `Codex session thread: ${payload.thread.threadId}`,
+    `Turns: ${payload.thread.turns ?? 0} (last: ${payload.thread.lastKind ?? "unknown"}, primed: ${payload.thread.primed ? "yes" : "no"})`,
+    `Created: ${payload.thread.createdAt ?? "unknown"}`,
+    `Resume in Codex: codex resume ${payload.thread.threadId}`
+  ];
+  if (payload.reset) {
+    lines.push("Mapping cleared. The next Codex run starts a new session thread.");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function handleSession(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json", "reset"]
+  });
+
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const sessionId = getCurrentClaudeSessionId();
+  const thread = getSessionThread(workspaceRoot, sessionId);
+  if (options.reset && sessionId) {
+    clearSessionThread(workspaceRoot, sessionId);
+  }
+
+  const payload = {
+    sessionId,
+    thread,
+    reset: Boolean(options.reset && thread)
+  };
+  outputCommandResult(payload, renderSessionReport(payload), options.json);
+}
+
 async function handleCancel(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -1054,6 +1284,9 @@ async function main() {
       break;
     case "result":
       handleResult(argv);
+      break;
+    case "session":
+      handleSession(argv);
       break;
     case "task-resume-candidate":
       handleTaskResumeCandidate(argv);

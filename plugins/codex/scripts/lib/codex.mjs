@@ -1006,13 +1006,23 @@ export async function runAppServerReview(cwd, options = {}) {
   }
 
   return withAppServer(cwd, async (client) => {
-    emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
-    const thread = await startThread(client, cwd, {
-      model: options.model,
-      sandbox: "read-only",
-      ephemeral: true,
-      threadName: options.threadName
-    });
+    let thread;
+    if (options.resumeThreadId) {
+      emitProgress(options.onProgress, `Resuming session thread ${options.resumeThreadId} for review.`, "starting");
+      thread = await resumeThread(client, options.resumeThreadId, cwd, {
+        model: options.model,
+        sandbox: "read-only",
+        ephemeral: false
+      });
+    } else {
+      emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
+      thread = await startThread(client, cwd, {
+        model: options.model,
+        sandbox: "read-only",
+        ephemeral: options.persistThread ? false : true,
+        threadName: options.threadName
+      });
+    }
     const sourceThreadId = thread.thread.id;
     emitProgress(options.onProgress, `Thread ready (${sourceThreadId}).`, "starting", {
       threadId: sourceThreadId

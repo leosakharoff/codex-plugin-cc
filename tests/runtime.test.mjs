@@ -611,7 +611,7 @@ test("task --resume-last does not resume a task from another Claude session", ()
 
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
   assert.equal(fakeState.lastTurnStart.threadId, "thr_1");
-  assert.equal(fakeState.lastTurnStart.prompt, "initial task");
+  assert.match(fakeState.lastTurnStart.prompt, /<session_thread>[\s\S]*<\/session_thread>\ninitial task$/);
 });
 
 test("task --resume-last ignores running tasks from other Claude sessions", () => {
