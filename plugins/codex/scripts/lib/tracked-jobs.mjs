@@ -171,6 +171,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       status: completionStatus,
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
+      ...(execution.run ? { model: execution.run.model ?? null, effort: execution.run.effort ?? null, tokens: execution.run.tokens?.totalTokens ?? null } : {}),
       summary: execution.summary,
       phase: completionStatus === "completed" ? "done" : "failed",
       pid: null,

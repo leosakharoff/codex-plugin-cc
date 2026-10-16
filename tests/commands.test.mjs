@@ -11,9 +11,9 @@ function read(relativePath) {
   return fs.readFileSync(path.join(PLUGIN_ROOT, relativePath), "utf8");
 }
 
-test("review command uses AskUserQuestion and background Bash while staying review-only", () => {
+test("review command decides wait vs background itself and stays review-only", () => {
   const source = read("commands/review.md");
-  assert.match(source, /AskUserQuestion/);
+  assert.match(source, /Do not use `AskUserQuestion` for this choice/);
   assert.match(source, /\bBash\(/);
   assert.match(source, /Do not fix issues/i);
   assert.match(source, /review-only/i);
@@ -30,18 +30,18 @@ test("review command uses AskUserQuestion and background Bash while staying revi
   assert.match(source, /git status --short --untracked-files=all/);
   assert.match(source, /git diff --shortstat/);
   assert.match(source, /Treat untracked files or directories as reviewable work/i);
-  assert.match(source, /Recommend waiting only when the review is clearly tiny, roughly 1-2 files total/i);
-  assert.match(source, /In every other case, including unclear size, recommend background/i);
+  assert.match(source, /Wait \(foreground\) only when the scoped review is clearly tiny, roughly 1-2 files total/i);
+  assert.match(source, /In every other case, including unclear size, run in the background/i);
   assert.match(source, /The companion script parses `--wait` and `--background`/i);
   assert.match(source, /Claude Code's `Bash\(..., run_in_background: true\)` is what actually detaches the run/i);
   assert.match(source, /When in doubt, run the review/i);
-  assert.match(source, /\(Recommended\)/);
+  assert.match(source, /native reviewer has no effort parameter/i);
   assert.match(source, /does not support staged-only review, unstaged-only review, or extra focus text/i);
 });
 
-test("adversarial review command uses AskUserQuestion and background Bash while staying review-only", () => {
+test("adversarial review command decides wait vs background itself and stays review-only", () => {
   const source = read("commands/adversarial-review.md");
-  assert.match(source, /AskUserQuestion/);
+  assert.match(source, /Do not use `AskUserQuestion` for this choice/);
   assert.match(source, /\bBash\(/);
   assert.match(source, /Do not fix issues/i);
   assert.match(source, /review-only/i);
@@ -49,7 +49,7 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
   assert.match(source, /```bash/);
   assert.match(source, /```typescript/);
   assert.match(source, /adversarial-review "\$ARGUMENTS"/);
-  assert.match(source, /\[--scope auto\|working-tree\|branch\] \[focus \.\.\.\]/);
+  assert.match(source, /\[--scope auto\|working-tree\|branch\] \[--ephemeral\|--fresh\] \[--effort <low\|medium\|high>\] \[focus \.\.\.\]/);
   assert.match(source, /run_in_background:\s*true/);
   assert.match(source, /command:\s*`node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/codex-companion\.mjs" adversarial-review "\$ARGUMENTS"`/);
   assert.match(source, /description:\s*"Codex adversarial review"/);
@@ -58,12 +58,13 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
   assert.match(source, /git status --short --untracked-files=all/);
   assert.match(source, /git diff --shortstat/);
   assert.match(source, /Treat untracked files or directories as reviewable work/i);
-  assert.match(source, /Recommend waiting only when the scoped review is clearly tiny, roughly 1-2 files total/i);
-  assert.match(source, /In every other case, including unclear size, recommend background/i);
+  assert.match(source, /Wait \(foreground\) only when the scoped review is clearly tiny, roughly 1-2 files total/i);
+  assert.match(source, /In every other case, including unclear size, run in the background/i);
   assert.match(source, /The companion script parses `--wait` and `--background`/i);
   assert.match(source, /Claude Code's `Bash\(..., run_in_background: true\)` is what actually detaches the run/i);
   assert.match(source, /When in doubt, run the review/i);
-  assert.match(source, /\(Recommended\)/);
+  assert.match(source, /--effort <low\|medium\|high>/);
+  assert.match(source, /Never pass `--model` unless the user names one/);
   assert.match(source, /uses the same review target selection as `\/codex:review`/i);
   assert.match(source, /supports working-tree review, branch review, and `--base <ref>`/i);
   assert.match(source, /does not support `--scope staged` or `--scope unstaged`/i);
@@ -78,6 +79,7 @@ test("continue is not exposed as a user-facing command", () => {
     "rescue.md",
     "result.md",
     "review.md",
+    "session.md",
     "setup.md",
     "status.md",
     "transfer.md"
@@ -102,28 +104,27 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /do not call `Skill\(codex:codex-rescue\)`/i);
   assert.doesNotMatch(rescue, /^context:\s*fork\b/m);
   assert.match(rescue, /--background\|--wait/);
-  assert.match(rescue, /--resume\|--fresh/);
+  assert.match(rescue, /--resume\|--fresh\|--ephemeral/);
   assert.match(rescue, /--model <model\|spark>/);
   assert.match(rescue, /--effort <none\|minimal\|low\|medium\|high\|xhigh>/);
-  assert.match(rescue, /task-resume-candidate --json/);
-  assert.match(rescue, /AskUserQuestion/);
-  assert.match(rescue, /Continue current Codex thread/);
-  assert.match(rescue, /Start a new Codex thread/);
+  assert.match(rescue, /Do not ask whether to continue or start a new thread/);
+  assert.match(rescue, /Cost policy/);
+  assert.match(rescue, /Never pass `--model` unless the user names a model/);
+  assert.match(rescue, /Never pass `xhigh` unless the user asks/);
   assert.match(rescue, /run the `codex:codex-rescue` subagent in the background/i);
-  assert.match(rescue, /default to foreground/i);
+  assert.match(rescue, /default to foreground for a bounded ask/i);
   assert.match(rescue, /Do not forward them to `task`/i);
   assert.match(rescue, /`--model` and `--effort` are runtime-selection flags/i);
-  assert.match(rescue, /Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort/i);
+  assert.match(rescue, /Choose `--effort` by the cost policy above/i);
   assert.match(rescue, /If they ask for `spark`, map it to `gpt-5\.3-codex-spark`/i);
-  assert.match(rescue, /If the request includes `--resume`, do not ask whether to continue/i);
-  assert.match(rescue, /If the request includes `--fresh`, do not ask whether to continue/i);
-  assert.match(rescue, /If the user chooses continue, add `--resume`/i);
-  assert.match(rescue, /If the user chooses a new thread, add `--fresh`/i);
+  assert.match(rescue, /`--resume` forces a continuation/i);
+  assert.match(rescue, /`--fresh` throws the session thread away/i);
+  assert.match(rescue, /`--ephemeral` runs this one request in a throwaway thread/i);
   assert.match(rescue, /thin forwarder only/i);
   assert.match(rescue, /Return the Codex companion stdout verbatim to the user/i);
   assert.match(rescue, /Do not paraphrase, summarize, rewrite, or add commentary before or after it/i);
   assert.match(rescue, /return that command's stdout as-is/i);
-  assert.match(rescue, /Leave `--resume` and `--fresh` in the forwarded request/i);
+  assert.match(rescue, /Leave `--resume`, `--fresh`, and `--ephemeral` in the forwarded request/i);
   assert.match(agent, /--resume/);
   assert.match(agent, /--fresh/);
   assert.match(agent, /thin forwarding wrapper/i);
@@ -132,7 +133,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /Use exactly one `Bash` call/i);
   assert.match(agent, /Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own/i);
   assert.match(agent, /Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
-  assert.match(agent, /Leave `--effort` unset unless the user explicitly requests a specific reasoning effort/i);
+  assert.match(agent, /Never choose `xhigh` on your own/i);
   assert.match(agent, /Leave model unset by default/i);
   assert.match(agent, /If the user asks for `spark`, map that to `--model gpt-5\.3-codex-spark`/i);
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
@@ -145,7 +146,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(runtimeSkill, /Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
   assert.match(runtimeSkill, /use the `gpt-5-4-prompting` skill to rewrite the user's request into a tighter Codex prompt/i);
   assert.match(runtimeSkill, /That prompt drafting is the only Claude-side work allowed/i);
-  assert.match(runtimeSkill, /Leave `--effort` unset unless the user explicitly requests a specific effort/i);
+  assert.match(runtimeSkill, /Never `xhigh` on your own/i);
   assert.match(runtimeSkill, /Leave model unset by default/i);
   assert.match(runtimeSkill, /Map `spark` to `--model gpt-5\.3-codex-spark`/i);
   assert.match(runtimeSkill, /If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only/i);
@@ -214,7 +215,7 @@ test("setup command can offer Codex install and still points users to codex logi
   const setup = read("commands/setup.md");
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
 
-  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
+  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\] \[--default-effort/);
   assert.match(setup, /AskUserQuestion/);
   assert.match(setup, /npm install -g @openai\/codex/);
   assert.match(setup, /codex-companion\.mjs" setup --json \$ARGUMENTS/);

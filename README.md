@@ -280,6 +280,21 @@ Upstream starts a new Codex thread for every review and, unless you say `--resum
 - Outside Claude Code (no `CODEX_COMPANION_SESSION_ID`), the companion behaves as upstream does.
 - The mapping is cleared on `SessionEnd`. The Codex thread itself stays in Codex's own history.
 
+## Cost visibility and effort policy
+
+Every companion run prints a header line first, for example:
+
+```text
+Codex run: gpt-6-astra, effort medium, 22.6k tokens (22.5k cached, 12 output). Session so far: 3 turns, 61.2k tokens.
+```
+
+- The model and effort are what the app-server reported for that turn, not what was requested.
+- Tokens come from Codex's `thread/tokenUsage/updated` event for that turn. Cached input is cheap; output and reasoning are the expensive part.
+- `/codex:session` sums the session: runs, tokens, and counts by effort, model, and kind. Ephemeral runs count too.
+- When a call passes no `--effort`, the companion applies a policy: task and adversarial review run at `medium`, the stop gate at `low`. Native `/codex:review` has no effort parameter and inherits the thread's current effort (or Codex's config default on a fresh thread).
+- `/codex:setup --default-effort <effort>` overrides the policy for a workspace, `--default-effort policy` restores it. `/codex:setup --default-model <model>` pins a model, `--default-model codex` clears it.
+- The slash commands tell Claude to decide wait vs background and the effort itself, to say one line with the decision before launching, and never to pick a model or `xhigh` on its own.
+
 ## Codex Integration
 
 The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).

@@ -13,7 +13,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { clearSessionThread, loadState, resolveStateFile, saveState } from "./lib/state.mjs";
+import { clearSessionThread, clearSessionUsage, loadState, resolveStateFile, saveState } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -51,6 +51,7 @@ function cleanupSessionJobs(cwd, sessionId) {
   }
 
   clearSessionThread(workspaceRoot, sessionId);
+  clearSessionUsage(workspaceRoot, sessionId);
 
   const state = loadState(workspaceRoot);
   const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);

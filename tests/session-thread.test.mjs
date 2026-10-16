@@ -248,3 +248,90 @@ test("session end hook clears the session thread mapping", () => {
   assert.equal(end.status, 0, end.stderr);
   assert.equal(getSessionThread(repo, "sess-a"), null);
 });
+
+test("runs report model, effort, and tokens, and the session usage adds up", () => {
+  const { repo, binDir, statePath } = setupRepo();
+  const env = sessionEnv(binDir, "sess-a");
+
+  const first = run("node", [SCRIPT, "task", "first task"], { cwd: repo, env });
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /^Codex run: gpt-5\.4, effort medium, 1\.2k tokens\. Session so far: 1 turn, 1\.2k tokens\.\n\n/);
+  assert.equal(readFakeState(statePath).lastTurnStart.effort, "medium");
+
+  const low = run("node", [SCRIPT, "task", "--effort", "low", "quick check"], { cwd: repo, env });
+  assert.equal(low.status, 0, low.stderr);
+  assert.match(low.stdout, /^Codex run: gpt-5\.4, effort low, 1\.2k tokens\. Session so far: 2 turns, 2\.5k tokens\./);
+  assert.equal(readFakeState(statePath).lastTurnStart.effort, "low");
+
+  const ephemeral = run("node", [SCRIPT, "task", "--ephemeral", "side task"], { cwd: repo, env });
+  assert.equal(ephemeral.status, 0, ephemeral.stderr);
+  assert.match(ephemeral.stdout, /Session so far: 3 turns/);
+
+  const session = run("node", [SCRIPT, "session"], { cwd: repo, env });
+  assert.match(session.stdout, /Codex usage this session: 3 runs, 3\.7k tokens \(600 output\)/);
+  assert.match(session.stdout, /by effort: medium x2, low x1/);
+  assert.match(session.stdout, /by model: gpt-5\.4 x3/);
+
+  const json = run("node", [SCRIPT, "session", "--json"], { cwd: repo, env });
+  const payload = JSON.parse(json.stdout);
+  assert.equal(payload.usage.turns, 3);
+  assert.equal(payload.usage.totalTokens, 3702);
+});
+
+test("adversarial review carries the run header and honours --effort", () => {
+  const { repo, binDir, statePath } = setupRepo();
+  const env = sessionEnv(binDir, "sess-a");
+  fs.writeFileSync(path.join(repo, "README.md"), "changed\n");
+
+  const review = run("node", [SCRIPT, "adversarial-review", "--effort", "low"], { cwd: repo, env });
+  assert.equal(review.status, 0, review.stderr);
+  assert.match(review.stdout, /^# Codex Adversarial Review\n\nCodex run: gpt-5\.4, effort low, 1\.2k tokens\./);
+  assert.equal(readFakeState(statePath).lastTurnStart.effort, "low");
+
+  const native = run("node", [SCRIPT, "review"], { cwd: repo, env });
+  assert.equal(native.status, 0, native.stderr);
+  assert.match(native.stdout, /^# Codex Review\n\nCodex run: gpt-5\.4, effort high, 1\.2k tokens\. Session so far: 2 turns/);
+});
+
+test("stop-gate prompts run at low effort by policy and workspace defaults override the policy", () => {
+  const { repo, binDir, statePath } = setupRepo();
+  const env = sessionEnv(binDir, "sess-a");
+
+  const gate = run("node", [SCRIPT, "task", "--json", "Run a stop-gate review of the previous Claude turn.\nNothing changed."], { cwd: repo, env });
+  assert.equal(gate.status, 0, gate.stderr);
+  assert.equal(readFakeState(statePath).lastTurnStart.effort, "low");
+  assert.equal(JSON.parse(gate.stdout).run.effort, "low");
+
+  const setup = run("node", [SCRIPT, "setup", "--default-effort", "high", "--json"], { cwd: repo, env });
+  assert.equal(setup.status, 0, setup.stderr);
+  assert.equal(JSON.parse(setup.stdout).defaultEffort, "high");
+
+  const task = run("node", [SCRIPT, "task", "after override"], { cwd: repo, env });
+  assert.equal(task.status, 0, task.stderr);
+  assert.equal(readFakeState(statePath).lastTurnStart.effort, "high");
+
+  const reset = run("node", [SCRIPT, "setup", "--default-effort", "policy", "--json"], { cwd: repo, env });
+  assert.equal(JSON.parse(reset.stdout).defaultEffort, null);
+  const again = run("node", [SCRIPT, "task", "back to policy"], { cwd: repo, env });
+  assert.equal(readFakeState(statePath).lastTurnStart.effort, "medium");
+
+  const pinned = run("node", [SCRIPT, "setup", "--default-model", "spark", "--json"], { cwd: repo, env });
+  assert.equal(JSON.parse(pinned.stdout).defaultModel, "gpt-5.3-codex-spark");
+  const sparkRun = run("node", [SCRIPT, "task", "with pinned model"], { cwd: repo, env });
+  assert.equal(readFakeState(statePath).lastTurnStart.model, "gpt-5.3-codex-spark");
+});
+
+test("session end hook clears the usage ledger", () => {
+  const { repo, binDir } = setupRepo();
+  const env = sessionEnv(binDir, "sess-a");
+  const task = run("node", [SCRIPT, "task", "first task"], { cwd: repo, env });
+  assert.equal(task.status, 0, task.stderr);
+
+  run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env,
+    input: JSON.stringify({ hook_event_name: "SessionEnd", session_id: "sess-a", cwd: repo })
+  });
+  const after = run("node", [SCRIPT, "session"], { cwd: repo, env });
+  assert.match(after.stdout, /Codex usage this session: no runs yet/);
+});

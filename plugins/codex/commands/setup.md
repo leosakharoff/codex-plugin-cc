@@ -1,6 +1,6 @@
 ---
-description: Check whether the local Codex CLI is ready and optionally toggle the stop-time review gate
-argument-hint: '[--enable-review-gate|--disable-review-gate]'
+description: Check whether the local Codex CLI is ready, toggle the stop-time review gate, or set the workspace default effort and model
+argument-hint: '[--enable-review-gate|--disable-review-gate] [--default-effort <low|medium|high|policy>] [--default-model <model|codex>]'
 allowed-tools: Bash(node:*), Bash(npm:*), AskUserQuestion
 ---
 
@@ -35,3 +35,8 @@ Output rules:
 - Present the final setup output to the user.
 - If installation was skipped, present the original setup output.
 - If Codex is installed but not authenticated, preserve the guidance to run `!codex login`.
+
+Workspace defaults:
+- `--default-effort <effort>` sets the effort the companion uses for task, adversarial review, and stop gate when a call passes none. `--default-effort policy` goes back to the built-in policy (task medium, adversarial review medium, stop gate low).
+- `--default-model <model>` pins the model for every companion run in this workspace. `--default-model codex` clears it so Codex's own config decides again.
+- Report the current default model and effort lines from the setup output to the user.

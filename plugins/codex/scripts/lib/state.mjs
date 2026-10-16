@@ -23,7 +23,8 @@ function defaultState() {
       stopReviewGate: false
     },
     jobs: [],
-    sessionThreads: {}
+    sessionThreads: {},
+    sessionUsage: {}
   };
 }
 
@@ -79,7 +80,8 @@ export function loadState(cwd) {
         ...(parsed.config ?? {})
       },
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
-      sessionThreads: normalizeSessionThreads(parsed.sessionThreads)
+      sessionThreads: normalizeSessionThreads(parsed.sessionThreads),
+      sessionUsage: normalizeSessionThreads(parsed.sessionUsage)
     };
   } catch {
     return defaultState();
@@ -109,7 +111,8 @@ export function saveState(cwd, state) {
       ...(state.config ?? {})
     },
     jobs: nextJobs,
-    sessionThreads: normalizeSessionThreads(state.sessionThreads)
+    sessionThreads: normalizeSessionThreads(state.sessionThreads),
+    sessionUsage: normalizeSessionThreads(state.sessionUsage)
   };
 
   const retainedIds = new Set(nextJobs.map((job) => job.id));
@@ -201,6 +204,47 @@ export function clearSessionThread(cwd, sessionId) {
   }
   updateState(cwd, (state) => {
     delete state.sessionThreads[sessionId];
+  });
+}
+
+function emptyUsage() {
+  return { turns: 0, totalTokens: 0, outputTokens: 0, byEffort: {}, byModel: {}, byKind: {} };
+}
+
+export function getSessionUsage(cwd, sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  return loadState(cwd).sessionUsage[sessionId] ?? null;
+}
+
+export function addSessionUsage(cwd, sessionId, { model, effort, tokens, kind }) {
+  if (!sessionId) {
+    return null;
+  }
+  updateState(cwd, (state) => {
+    const usage = { ...emptyUsage(), ...(state.sessionUsage[sessionId] ?? {}) };
+    const modelKey = model ?? "default";
+    const effortKey = effort ?? "default";
+    const kindKey = kind ?? "task";
+    usage.turns += 1;
+    usage.totalTokens += Number(tokens?.totalTokens ?? 0);
+    usage.outputTokens += Number(tokens?.outputTokens ?? 0);
+    usage.byEffort[effortKey] = (usage.byEffort[effortKey] ?? 0) + 1;
+    usage.byModel[modelKey] = (usage.byModel[modelKey] ?? 0) + 1;
+    usage.byKind[kindKey] = (usage.byKind[kindKey] ?? 0) + 1;
+    usage.updatedAt = nowIso();
+    state.sessionUsage[sessionId] = usage;
+  });
+  return getSessionUsage(cwd, sessionId);
+}
+
+export function clearSessionUsage(cwd, sessionId) {
+  if (!sessionId) {
+    return;
+  }
+  updateState(cwd, (state) => {
+    delete state.sessionUsage[sessionId];
   });
 }
 

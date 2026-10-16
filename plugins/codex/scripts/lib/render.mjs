@@ -187,6 +187,8 @@ export function renderSetupReport(report) {
     `- auth: ${report.auth.detail}`,
     `- session runtime: ${report.sessionRuntime.label}`,
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    `- default model: ${report.defaultModel ?? "Codex config decides"}`,
+    `- default effort: ${report.defaultEffort ?? `policy (task ${report.effortPolicy?.task ?? "medium"}, adversarial review ${report.effortPolicy?.["adversarial-review"] ?? "medium"}, stop gate ${report.effortPolicy?.["stop-gate"] ?? "low"}; native review inherits the thread)`}`,
     ""
   ];
 
@@ -208,11 +210,18 @@ export function renderSetupReport(report) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+function reviewTitleLines(meta) {
+  const lines = [`# Codex ${meta.reviewLabel}`, ""];
+  if (meta.run) {
+    lines.push(renderRunHeader(meta.run), "");
+  }
+  return lines;
+}
+
 export function renderReviewResult(parsedResult, meta) {
   if (!parsedResult.parsed) {
     const lines = [
-      `# Codex ${meta.reviewLabel}`,
-      "",
+      ...reviewTitleLines(meta),
       "Codex did not return valid structured JSON.",
       "",
       `- Parse error: ${parsedResult.parseError}`
@@ -230,8 +239,7 @@ export function renderReviewResult(parsedResult, meta) {
   const validationError = validateReviewResultShape(parsedResult.parsed);
   if (validationError) {
     const lines = [
-      `# Codex ${meta.reviewLabel}`,
-      "",
+      ...reviewTitleLines(meta),
       `Target: ${meta.targetLabel}`,
       "Codex returned JSON with an unexpected review shape.",
       "",
@@ -250,8 +258,7 @@ export function renderReviewResult(parsedResult, meta) {
   const data = normalizeReviewResultData(parsedResult.parsed);
   const findings = [...data.findings].sort((left, right) => severityRank(left.severity) - severityRank(right.severity));
   const lines = [
-    `# Codex ${meta.reviewLabel}`,
-    "",
+    ...reviewTitleLines(meta),
     `Target: ${meta.targetLabel}`,
     `Verdict: ${data.verdict}`,
     "",
@@ -289,8 +296,7 @@ export function renderNativeReviewResult(result, meta) {
   const stdout = result.stdout.trim();
   const stderr = result.stderr.trim();
   const lines = [
-    `# Codex ${meta.reviewLabel}`,
-    "",
+    ...reviewTitleLines(meta),
     `Target: ${meta.targetLabel}`,
     ""
   ];
@@ -312,14 +318,49 @@ export function renderNativeReviewResult(result, meta) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+export function formatTokenCount(value) {
+  const count = Number(value ?? 0);
+  if (!Number.isFinite(count) || count <= 0) {
+    return "0";
+  }
+  if (count >= 1_000_000) {
+    return `${(count / 1_000_000).toFixed(1)}M`;
+  }
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return String(Math.round(count));
+}
+
+export function renderRunHeader(run) {
+  if (!run) {
+    return "";
+  }
+  const parts = [`Codex run: ${run.model ?? "default model"}, effort ${run.effort ?? "default"}`];
+  if (run.tokens && Number(run.tokens.totalTokens) > 0) {
+    const cached = Number(run.tokens.cachedInputTokens ?? 0);
+    parts.push(
+      cached > 0
+        ? `${formatTokenCount(run.tokens.totalTokens)} tokens (${formatTokenCount(cached)} cached, ${formatTokenCount(run.tokens.outputTokens)} output)`
+        : `${formatTokenCount(run.tokens.totalTokens)} tokens`
+    );
+  }
+  let line = parts.join(", ");
+  if (run.session && run.session.turns > 0) {
+    line += `. Session so far: ${run.session.turns} turn${run.session.turns === 1 ? "" : "s"}, ${formatTokenCount(run.session.totalTokens)} tokens`;
+  }
+  return `${line}.`;
+}
+
 export function renderTaskResult(parsedResult, meta) {
+  const header = meta?.run ? `${renderRunHeader(meta.run)}\n\n` : "";
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   if (rawOutput) {
-    return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    return `${header}${rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`}`;
   }
 
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Codex did not return a final message.";
-  return `${message}\n`;
+  return `${header}${message}\n`;
 }
 
 export function renderStatusReport(report) {

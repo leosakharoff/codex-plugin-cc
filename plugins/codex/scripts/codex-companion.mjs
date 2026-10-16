@@ -27,10 +27,12 @@ import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
+  addSessionUsage,
   clearSessionThread,
   generateJobId,
   getConfig,
   getSessionThread,
+  getSessionUsage,
   listJobs,
   setConfig,
   setSessionThread,
@@ -57,6 +59,7 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
+  formatTokenCount,
   renderNativeReviewResult,
   renderReviewResult,
   renderStoredJobResult,
@@ -75,14 +78,21 @@ const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "hi
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 const SESSION_THREAD_PREFIX = "Codex Companion Session";
+// Effort policy: what the plugin sends when neither the caller nor the workspace config chose one.
+// Codex's own config default (model_reasoning_effort) is only used for native review, which has no effort parameter.
+const DEFAULT_EFFORT_BY_CLASS = {
+  task: "medium",
+  "adversarial-review": "medium",
+  "stop-gate": "low"
+};
 
 function printUsage() {
   console.log(
     [
       "Usage:",
-      "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
+      "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--default-effort <effort|policy>] [--default-model <model|codex>] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--ephemeral|--fresh]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--ephemeral|--fresh] [focus text]",
+      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--ephemeral|--fresh] [--model <model>] [--effort <effort>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh|--ephemeral] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs session [--reset] [--json]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
@@ -212,6 +222,9 @@ async function buildSetupReport(cwd, actionsTaken = []) {
     auth: authStatus,
     sessionRuntime: getSessionRuntimeStatus(process.env, workspaceRoot),
     reviewGateEnabled: Boolean(config.stopReviewGate),
+    defaultEffort: config.defaultEffort ?? null,
+    defaultModel: config.defaultModel ?? null,
+    effortPolicy: DEFAULT_EFFORT_BY_CLASS,
     actionsTaken,
     nextSteps
   };
@@ -219,7 +232,7 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 
 async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
+    valueOptions: ["cwd", "default-effort", "default-model"],
     booleanOptions: ["json", "enable-review-gate", "disable-review-gate"]
   });
 
@@ -237,6 +250,30 @@ async function handleSetup(argv) {
   } else if (options["disable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", false);
     actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
+  }
+
+  if (options["default-effort"] != null) {
+    const raw = String(options["default-effort"]).trim().toLowerCase();
+    if (raw === "policy" || raw === "") {
+      setConfig(workspaceRoot, "defaultEffort", null);
+      actionsTaken.push("Cleared the workspace default effort. The built-in policy applies again.");
+    } else {
+      const effort = normalizeReasoningEffort(raw);
+      setConfig(workspaceRoot, "defaultEffort", effort);
+      actionsTaken.push(`Set the workspace default effort to ${effort} for task, adversarial review, and stop gate.`);
+    }
+  }
+
+  if (options["default-model"] != null) {
+    const raw = String(options["default-model"]).trim();
+    if (raw.toLowerCase() === "codex" || raw === "") {
+      setConfig(workspaceRoot, "defaultModel", null);
+      actionsTaken.push("Cleared the workspace default model. Codex's own config decides.");
+    } else {
+      const model = normalizeRequestedModel(raw);
+      setConfig(workspaceRoot, "defaultModel", model);
+      actionsTaken.push(`Set the workspace default model to ${model}.`);
+    }
   }
 
   const finalReport = await buildSetupReport(cwd, actionsTaken);
@@ -457,6 +494,37 @@ function recordSessionThreadTurn(workspaceRoot, plan, threadId, { kind, primed }
   });
 }
 
+function resolveRunEffort(workspaceRoot, requestedEffort, jobClassKey) {
+  if (requestedEffort) {
+    return requestedEffort;
+  }
+  const config = getConfig(workspaceRoot);
+  return config.defaultEffort ?? DEFAULT_EFFORT_BY_CLASS[jobClassKey] ?? null;
+}
+
+function resolveRunModel(workspaceRoot, requestedModel) {
+  if (requestedModel) {
+    return requestedModel;
+  }
+  return getConfig(workspaceRoot).defaultModel ?? null;
+}
+
+function buildRunInfo(workspaceRoot, result, kind) {
+  const sessionId = getCurrentClaudeSessionId();
+  const tokens = result.tokenUsage ?? null;
+  const run = {
+    model: result.model ?? null,
+    effort: result.effort ?? null,
+    tokens,
+    kind
+  };
+  const session = addSessionUsage(workspaceRoot, sessionId, run);
+  return {
+    ...run,
+    session: session ? { turns: session.turns, totalTokens: session.totalTokens } : null
+  };
+}
+
 async function executeReviewRun(request) {
   ensureCodexAvailable(request.cwd);
   ensureGitRepository(request.cwd);
@@ -477,7 +545,7 @@ async function executeReviewRun(request) {
     const runNativeReview = (resumeThreadId) =>
       runAppServerReview(request.cwd, {
         target: reviewTarget,
-        model: request.model,
+        model: resolveRunModel(workspaceRoot, request.model),
         resumeThreadId,
         persistThread: Boolean(sessionPlan),
         threadName: sessionPlan?.threadName ?? null,
@@ -497,11 +565,13 @@ async function executeReviewRun(request) {
       result = await runNativeReview(null);
     }
     recordSessionThreadTurn(workspaceRoot, sessionPlan, result.sourceThreadId, { kind: "review", primed: false });
+    const run = buildRunInfo(workspaceRoot, result, "review");
     const payload = {
       review: reviewName,
       target,
       threadId: result.threadId,
       sourceThreadId: result.sourceThreadId,
+      run,
       codex: {
         status: result.status,
         stderr: result.stderr,
@@ -515,7 +585,7 @@ async function executeReviewRun(request) {
         stdout: result.reviewText,
         stderr: result.stderr
       },
-      { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
+      { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary, run }
     );
 
     return {
@@ -527,6 +597,7 @@ async function executeReviewRun(request) {
       summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
       jobTitle: `Codex ${reviewName}`,
       jobClass: "review",
+      run,
       targetLabel: target.label
     };
   }
@@ -537,7 +608,8 @@ async function executeReviewRun(request) {
     runAppServerTurn(context.repoRoot, {
       resumeThreadId: plan?.threadId ?? null,
       prompt: plan?.needsPrimer ? `${buildSessionPrimer(workspaceRoot)}${basePrompt}` : basePrompt,
-      model: request.model,
+      model: resolveRunModel(workspaceRoot, request.model),
+      effort: resolveRunEffort(workspaceRoot, request.effort, "adversarial-review"),
       sandbox: "read-only",
       outputSchema: readOutputSchema(REVIEW_SCHEMA),
       persistThread: Boolean(plan),
@@ -558,6 +630,7 @@ async function executeReviewRun(request) {
     result = await runAdversarialTurn(sessionPlan);
   }
   recordSessionThreadTurn(workspaceRoot, sessionPlan, result.threadId, { kind: "adversarial-review", primed: true });
+  const run = buildRunInfo(workspaceRoot, result, "adversarial-review");
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
@@ -566,6 +639,7 @@ async function executeReviewRun(request) {
     review: reviewName,
     target,
     threadId: result.threadId,
+    run,
     context: {
       repoRoot: context.repoRoot,
       branch: context.branch,
@@ -591,11 +665,13 @@ async function executeReviewRun(request) {
     rendered: renderReviewResult(parsed, {
       reviewLabel: reviewName,
       targetLabel: context.target.label,
-      reasoningSummary: result.reasoningSummary
+      reasoningSummary: result.reasoningSummary,
+      run
     }),
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Codex ${reviewName}`,
     jobClass: "review",
+    run,
     targetLabel: context.target.label
   };
 }
@@ -629,13 +705,14 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
+  const effortClass = String(request.prompt ?? "").includes(STOP_REVIEW_TASK_MARKER) ? "stop-gate" : "task";
   const runTaskTurn = (threadId, plan) =>
     runAppServerTurn(workspaceRoot, {
       resumeThreadId: threadId,
       prompt: plan?.needsPrimer ? `${buildSessionPrimer(workspaceRoot)}${request.prompt ?? ""}` : request.prompt,
       defaultPrompt: threadId ? DEFAULT_CONTINUE_PROMPT : "",
-      model: request.model,
-      effort: request.effort,
+      model: resolveRunModel(workspaceRoot, request.model),
+      effort: resolveRunEffort(workspaceRoot, request.effort, effortClass),
       sandbox: request.write ? "workspace-write" : "read-only",
       onProgress: request.onProgress,
       persistThread: true,
@@ -658,6 +735,7 @@ async function executeTaskRun(request) {
     result = await runTaskTurn(null, sessionPlan);
   }
   recordSessionThreadTurn(workspaceRoot, sessionPlan, result.threadId, { kind: "task", primed: true });
+  const run = buildRunInfo(workspaceRoot, result, effortClass);
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? result.stderr ?? "";
@@ -670,12 +748,14 @@ async function executeTaskRun(request) {
     {
       title: taskMetadata.title,
       jobId: request.jobId ?? null,
-      write: Boolean(request.write)
+      write: Boolean(request.write),
+      run
     }
   );
   const payload = {
     status: result.status,
     threadId: result.threadId,
+    run,
     rawOutput,
     touchedFiles: result.touchedFiles,
     reasoningSummary: result.reasoningSummary
@@ -690,6 +770,7 @@ async function executeTaskRun(request) {
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
     jobTitle: taskMetadata.title,
     jobClass: "task",
+    run,
     write: Boolean(request.write)
   };
 }
@@ -880,7 +961,7 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd"],
+    valueOptions: ["base", "scope", "model", "effort", "cwd"],
     booleanOptions: ["json", "background", "wait", "ephemeral", "fresh"],
     aliasMap: {
       m: "model"
@@ -917,7 +998,8 @@ async function handleReviewCommand(argv, config) {
         cwd,
         base: options.base,
         scope: options.scope,
-        model: options.model,
+        model: normalizeRequestedModel(options.model),
+        effort: normalizeReasoningEffort(options.effort),
         focusText,
         reviewName: config.reviewName,
         fresh: Boolean(options.fresh),
@@ -1145,16 +1227,38 @@ function handleTaskResumeCandidate(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
+function formatCountMap(map) {
+  const entries = Object.entries(map ?? {});
+  if (entries.length === 0) {
+    return "none";
+  }
+  return entries.map(([key, count]) => `${key} x${count}`).join(", ");
+}
+
+function appendUsageLines(lines, usage) {
+  if (!usage || !usage.turns) {
+    lines.push("Codex usage this session: no runs yet.");
+    return;
+  }
+  lines.push(
+    `Codex usage this session: ${usage.turns} run${usage.turns === 1 ? "" : "s"}, ${formatTokenCount(usage.totalTokens)} tokens (${formatTokenCount(usage.outputTokens)} output)`,
+    `  by effort: ${formatCountMap(usage.byEffort)}`,
+    `  by model: ${formatCountMap(usage.byModel)}`,
+    `  by kind: ${formatCountMap(usage.byKind)}`
+  );
+}
+
 function renderSessionReport(payload) {
   if (!payload.sessionId) {
     return "Not running inside a Claude Code session, so there is no session thread. Each Codex run uses its own thread.\n";
   }
   if (!payload.thread) {
-    return [
+    const lines = [
       `Claude session: ${payload.sessionId}`,
-      "No Codex session thread yet. The next /codex:rescue, /codex:review, or /codex:adversarial-review creates it.",
-      ""
-    ].join("\n");
+      "No Codex session thread yet. The next /codex:rescue, /codex:review, or /codex:adversarial-review creates it."
+    ];
+    appendUsageLines(lines, payload.usage);
+    return `${lines.join("\n")}\n`;
   }
   const lines = [
     `Claude session: ${payload.sessionId}`,
@@ -1163,6 +1267,7 @@ function renderSessionReport(payload) {
     `Created: ${payload.thread.createdAt ?? "unknown"}`,
     `Resume in Codex: codex resume ${payload.thread.threadId}`
   ];
+  appendUsageLines(lines, payload.usage);
   if (payload.reset) {
     lines.push("Mapping cleared. The next Codex run starts a new session thread.");
   }
@@ -1185,6 +1290,7 @@ function handleSession(argv) {
   const payload = {
     sessionId,
     thread,
+    usage: getSessionUsage(workspaceRoot, sessionId),
     reset: Boolean(options.reset && thread)
   };
   outputCommandResult(payload, renderSessionReport(payload), options.json);

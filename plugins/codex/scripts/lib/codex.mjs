@@ -327,6 +327,8 @@ function createTurnCaptureState(threadId, options = {}) {
     completionTimer: null,
     lastAgentMessage: "",
     reviewText: "",
+    tokenUsage: null,
+    tokenUsageTotal: null,
     reasoningSummary: [],
     error: null,
     messages: [],
@@ -537,6 +539,12 @@ function applyTurnNotification(state, message) {
     case "error":
       state.error = message.params.error;
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
+      break;
+    case "thread/tokenUsage/updated":
+      if ((message.params.threadId ?? null) === state.threadId && message.params.tokenUsage) {
+        state.tokenUsage = message.params.tokenUsage.last ?? null;
+        state.tokenUsageTotal = message.params.tokenUsage.total ?? null;
+      }
       break;
     case "turn/completed":
       if ((message.params.threadId ?? null) !== state.threadId) {
@@ -1024,7 +1032,9 @@ export async function runAppServerReview(cwd, options = {}) {
       });
     }
     const sourceThreadId = thread.thread.id;
-    emitProgress(options.onProgress, `Thread ready (${sourceThreadId}).`, "starting", {
+    const runModel = thread.model ?? options.model ?? null;
+    const runEffort = thread.reasoningEffort ?? null;
+    emitProgress(options.onProgress, `Thread ready (${sourceThreadId}). Model ${runModel ?? "default"}, effort ${runEffort ?? "default"}.`, "starting", {
       threadId: sourceThreadId
     });
     const delivery = options.delivery ?? "inline";
@@ -1056,6 +1066,10 @@ export async function runAppServerReview(cwd, options = {}) {
       threadId: turnState.threadId,
       sourceThreadId,
       turnId: turnState.turnId,
+      model: runModel,
+      effort: runEffort,
+      tokenUsage: turnState.tokenUsage,
+      tokenUsageTotal: turnState.tokenUsageTotal,
       reviewText: turnState.reviewText,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
@@ -1110,27 +1124,30 @@ export async function runAppServerTurn(cwd, options = {}) {
 
   return withAppServer(cwd, async (client) => {
     let threadId;
+    let threadResponse;
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
-      const response = await resumeThread(client, options.resumeThreadId, cwd, {
+      threadResponse = await resumeThread(client, options.resumeThreadId, cwd, {
         model: options.model,
         sandbox: options.sandbox,
         ephemeral: false
       });
-      threadId = response.thread.id;
+      threadId = threadResponse.thread.id;
     } else {
       emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
-      const response = await startThread(client, cwd, {
+      threadResponse = await startThread(client, cwd, {
         model: options.model,
         sandbox: options.sandbox,
         ephemeral: options.persistThread ? false : true,
         threadName: options.persistThread ? options.threadName : options.threadName ?? null
       });
-      threadId = response.thread.id;
+      threadId = threadResponse.thread.id;
     }
 
-    emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
+    const runModel = options.model ?? threadResponse.model ?? null;
+    const runEffort = options.effort ?? threadResponse.reasoningEffort ?? null;
+    emitProgress(options.onProgress, `Thread ready (${threadId}). Model ${runModel ?? "default"}, effort ${runEffort ?? "default"}.`, "starting", {
       threadId
     });
 
@@ -1157,6 +1174,10 @@ export async function runAppServerTurn(cwd, options = {}) {
       status: buildResultStatus(turnState),
       threadId,
       turnId: turnState.turnId,
+      model: runModel,
+      effort: runEffort,
+      tokenUsage: turnState.tokenUsage,
+      tokenUsageTotal: turnState.tokenUsageTotal,
       finalMessage: turnState.lastAgentMessage,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
