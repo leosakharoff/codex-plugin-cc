@@ -1,6 +1,6 @@
 ---
 description: Run a Codex code review against local git state
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--ephemeral|--fresh]'
+argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--session|--fresh]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 ---
@@ -31,12 +31,13 @@ Execution mode rules (decide yourself, do not ask):
 
 Argument handling:
 - Preserve the user's arguments exactly.
-- By default the review runs as a turn in this Claude session's Codex thread, so Codex remembers earlier reviews and tasks from the session. `--ephemeral` runs it in a throwaway thread instead. `--fresh` starts a new session thread first.
-- If the companion reports that the session thread is busy, tell the user to wait for `/codex:status` or rerun with `--ephemeral`.
+- By default the review runs in a throwaway thread, so Codex reviews with a clean context and the session thread is left alone. `--session` runs it as a turn in this Claude session's Codex thread instead, so Codex remembers earlier reviews and tasks. `--fresh` starts a new session thread first and runs in it.
+- Do not add `--session` or `--fresh` yourself. Pass them only when the user asks for them.
+- If the companion reports that the session thread is busy, tell the user to wait for `/codex:status` or rerun without `--session`.
 - Do not strip `--wait` or `--background` yourself.
 - Do not add extra review instructions or rewrite the user's intent.
 - The companion script parses `--wait` and `--background`, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
-- The native reviewer has no effort parameter. It inherits the session thread's current effort, or Codex's config default on a fresh thread. For a cheaper or steerable pass use `/codex:adversarial-review --effort low`.
+- The native reviewer has no effort parameter. It uses Codex's config default, or the session thread's current effort with `--session`. For a cheaper or steerable pass use `/codex:adversarial-review --effort low`.
 - `/codex:review` is native-review only. It does not support staged-only review, unstaged-only review, or extra focus text.
 - If the user needs custom review instructions or more adversarial framing, they should use `/codex:adversarial-review`.
 

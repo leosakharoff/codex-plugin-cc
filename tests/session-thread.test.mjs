@@ -76,12 +76,42 @@ test("different Claude sessions get different Codex threads", () => {
   assert.equal(getSessionThread(repo, "sess-b").threadId, "thr_2");
 });
 
-test("adversarial review joins the session thread and primes it when it is the first turn", () => {
+test("reviews run in a throwaway thread by default and leave the session thread alone", () => {
+  const { repo, binDir, statePath } = setupRepo();
+  const env = sessionEnv(binDir, "sess-a");
+
+  const task = run("node", [SCRIPT, "task", "first task"], { cwd: repo, env });
+  assert.equal(task.status, 0, task.stderr);
+  fs.writeFileSync(path.join(repo, "README.md"), "changed\n");
+
+  const native = run("node", [SCRIPT, "review", "--json"], { cwd: repo, env });
+  assert.equal(native.status, 0, native.stderr);
+  const nativeThreadId = JSON.parse(native.stdout).sourceThreadId;
+  assert.notEqual(nativeThreadId, "thr_1");
+  assert.equal(readFakeState(statePath).threads.find((thread) => thread.id === nativeThreadId).ephemeral, true);
+
+  const adversarial = run("node", [SCRIPT, "adversarial-review", "--json"], { cwd: repo, env });
+  assert.equal(adversarial.status, 0, adversarial.stderr);
+  const afterAdversarial = readFakeState(statePath);
+  assert.notEqual(afterAdversarial.lastTurnStart.threadId, "thr_1");
+  assert.doesNotMatch(afterAdversarial.lastTurnStart.prompt, /^<session_thread>/);
+
+  const record = getSessionThread(repo, "sess-a");
+  assert.equal(record.threadId, "thr_1");
+  assert.equal(record.turns, 1);
+  assert.equal(record.lastKind, "task");
+
+  const clash = run("node", [SCRIPT, "review", "--ephemeral", "--session"], { cwd: repo, env });
+  assert.notEqual(clash.status, 0);
+  assert.match(clash.stderr, /--ephemeral cannot be combined with --session or --fresh/);
+});
+
+test("adversarial review with --session joins the session thread and primes it when it is the first turn", () => {
   const { repo, binDir, statePath } = setupRepo();
   const env = sessionEnv(binDir, "sess-a");
   fs.writeFileSync(path.join(repo, "README.md"), "changed\n");
 
-  const review = run("node", [SCRIPT, "adversarial-review", "--json"], { cwd: repo, env });
+  const review = run("node", [SCRIPT, "adversarial-review", "--session", "--json"], { cwd: repo, env });
   assert.equal(review.status, 0, review.stderr);
   const afterReview = readFakeState(statePath);
   assert.equal(afterReview.lastTurnStart.threadId, "thr_1");
@@ -97,7 +127,7 @@ test("adversarial review joins the session thread and primes it when it is the f
   assert.equal(getSessionThread(repo, "sess-a").turns, 2);
 });
 
-test("native review resumes the session thread once a task created it", () => {
+test("native review with --session resumes the session thread once a task created it", () => {
   const { repo, binDir, statePath } = setupRepo();
   const env = sessionEnv(binDir, "sess-a");
 
@@ -105,7 +135,7 @@ test("native review resumes the session thread once a task created it", () => {
   assert.equal(task.status, 0, task.stderr);
 
   fs.writeFileSync(path.join(repo, "README.md"), "changed\n");
-  const review = run("node", [SCRIPT, "review", "--json"], { cwd: repo, env });
+  const review = run("node", [SCRIPT, "review", "--session", "--json"], { cwd: repo, env });
   assert.equal(review.status, 0, review.stderr);
   const payload = JSON.parse(review.stdout);
   assert.equal(payload.sourceThreadId, "thr_1");
@@ -114,12 +144,12 @@ test("native review resumes the session thread once a task created it", () => {
   assert.equal(getSessionThread(repo, "sess-a").lastKind, "review");
 });
 
-test("native review as the first turn creates the session thread without marking it primed", () => {
+test("native review with --session as the first turn creates the session thread without marking it primed", () => {
   const { repo, binDir, statePath } = setupRepo();
   const env = sessionEnv(binDir, "sess-a");
   fs.writeFileSync(path.join(repo, "README.md"), "changed\n");
 
-  const review = run("node", [SCRIPT, "review", "--json"], { cwd: repo, env });
+  const review = run("node", [SCRIPT, "review", "--session", "--json"], { cwd: repo, env });
   assert.equal(review.status, 0, review.stderr);
   const record = getSessionThread(repo, "sess-a");
   assert.equal(record.threadId, "thr_1");

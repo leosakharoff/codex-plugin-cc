@@ -91,8 +91,8 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--default-effort <effort|policy>] [--default-model <model|codex>] [--json]",
-      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--ephemeral|--fresh]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--ephemeral|--fresh] [--model <model>] [--effort <effort>] [focus text]",
+      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--session|--fresh|--ephemeral]",
+      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--session|--fresh|--ephemeral] [--model <model>] [--effort <effort>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh|--ephemeral] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs session [--reset] [--json]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
@@ -962,15 +962,17 @@ function enqueueBackgroundTask(cwd, job, request) {
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["base", "scope", "model", "effort", "cwd"],
-    booleanOptions: ["json", "background", "wait", "ephemeral", "fresh"],
+    booleanOptions: ["json", "background", "wait", "ephemeral", "fresh", "session"],
     aliasMap: {
       m: "model"
     }
   });
 
-  if (options.ephemeral && options.fresh) {
-    throw new Error("Choose either --ephemeral or --fresh.");
+  if (options.ephemeral && (options.fresh || options.session)) {
+    throw new Error("--ephemeral cannot be combined with --session or --fresh.");
   }
+  // A reviewer that has not seen the work catches more, so reviews join the session thread only on request.
+  const ephemeral = !options.session && !options.fresh;
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -989,7 +991,7 @@ async function handleReviewCommand(argv, config) {
     workspaceRoot,
     jobClass: "review",
     summary: metadata.summary,
-    ephemeral: Boolean(options.ephemeral)
+    ephemeral
   });
   await runForegroundCommand(
     job,
@@ -1003,7 +1005,7 @@ async function handleReviewCommand(argv, config) {
         focusText,
         reviewName: config.reviewName,
         fresh: Boolean(options.fresh),
-        ephemeral: Boolean(options.ephemeral),
+        ephemeral,
         jobId: job.id,
         onProgress: progress
       }),

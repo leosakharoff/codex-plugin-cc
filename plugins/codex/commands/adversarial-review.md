@@ -1,6 +1,6 @@
 ---
 description: Run a Codex review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--ephemeral|--fresh] [--effort <low|medium|high>] [focus ...]'
+argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--session|--fresh] [--effort <low|medium|high>] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 ---
@@ -34,8 +34,9 @@ Execution mode rules (decide yourself, do not ask):
 
 Argument handling:
 - Preserve the user's arguments exactly.
-- By default the review runs as a turn in this Claude session's Codex thread, so Codex remembers earlier reviews and tasks from the session. `--ephemeral` runs it in a throwaway thread instead. `--fresh` starts a new session thread first.
-- If the companion reports that the session thread is busy, tell the user to wait for `/codex:status` or rerun with `--ephemeral`.
+- By default the review runs in a throwaway thread, so Codex reviews with a clean context and the session thread is left alone. `--session` runs it as a turn in this Claude session's Codex thread instead, so Codex remembers earlier reviews and tasks. `--fresh` starts a new session thread first and runs in it.
+- Do not add `--session` or `--fresh` yourself. Pass them only when the user asks for them.
+- If the companion reports that the session thread is busy, tell the user to wait for `/codex:status` or rerun without `--session`.
 - Do not strip `--wait` or `--background` yourself.
 - Do not weaken the adversarial framing or rewrite the user's focus text.
 - The companion script parses `--wait` and `--background`, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.

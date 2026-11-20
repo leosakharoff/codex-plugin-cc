@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0-ws.3 (fork)
+
+- `review` and `adversarial-review` run in a throwaway thread by default, so the reviewer has a clean context.
+- New `--session` flag on both reviews to run them as a turn in the session thread. `--fresh` still starts a new session thread and runs in it.
+
 ## 1.1.0-ws.2 (fork)
 
 - Every run prints `Codex run: <model>, effort <effort>, <tokens>` plus the session total.
